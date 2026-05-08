@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Lock file (machine-specific)
+pnpm-lock.yaml
+
+# Runtime state
+.mcp_port
+
+# Config with secrets (keep your own)
+.env
+
+# Generated client config (contains bearer token)
+mcp-client-config.json
+
+# PM2 ecosystem (contains your token)
+ecosystem.config.cjs
+
+# PM2
+pm2.log
+pm2.pid
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test artifacts
+test_input.txt
+todo.md
