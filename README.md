@@ -158,6 +158,111 @@ yourdomain.com {
 }
 ```
 
+## Remote Access 🌍
+
+After running the setup wizard, your server is running on `localhost`. To make it accessible from the internet, you need a reverse proxy. Here are the common recipes:
+
+### Option 1: Caddy (Recommended — auto-HTTPS)
+
+Best for: Quick setup with zero config.
+
+```bash
+# After setup, Caddyfile is already generated
+caddy run
+```
+
+Caddy will:
+- Obtain a free TLS certificate from Let's Encrypt
+- Auto-renew it before expiry
+- Forward all requests to your meowshell port
+
+The generated `Caddyfile` looks like:
+```
+yourdomain.com {
+    reverse_proxy localhost:13579
+}
+```
+
+### Option 2: nginx
+
+Best for: More control, existing nginx setup.
+
+```nginx
+server {
+    server_name yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:13579;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Then enable TLS (let's encrypt):
+```bash
+sudo certbot --nginx -d yourdomain.com
+```
+
+### Option 3: Cloudflare Tunnel (No port forwarding needed)
+
+Best for: Home servers behind NAT, no static IP.
+
+```bash
+# Install cloudflared
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+chmod +x cloudflared
+
+# Create a tunnel (one-time)
+./cloudflared tunnel login
+./cloudflared tunnel create my-mcp-server
+
+# Run the tunnel
+./cloudflared tunnel run --url http://localhost:13579 my-mcp-server
+```
+
+Cloudflare gives you a URL like `https://my-mcp-server.trycloudflare.com` with free HTTPS.
+
+### Option 4: SSH Tunnel (Quick test)
+
+For testing only — not for production:
+
+```bash
+# On your local machine
+ssh -L 13579:localhost:13579 user@your-server
+```
+
+Then connect your MCP client to `http://localhost:13579`.
+
+---
+
+### Quick Checklist Before Exposing
+
+| Check | ✅ |
+|-------|-----|
+| Server is running locally with `node meowshell.js` | |
+| `--health` returns `{"status":"ok"}` | |
+| Port is not firewalled locally | |
+| You have a domain (for Caddy/nginx) or cloudflare account | |
+| Token in `.env` is strong (setup wizard auto-generates one) | |
+
+---
+
+### Production Tips
+
+1. **Use a strong token** — The setup wizard generates a 96-char hex token. Don't shrink it.
+2. **Don't expose raw HTTP** — Always use HTTPS via proxy, or at minimum tunnel with Cloudflare.
+3. **Keep the token secret** — If leaked, rotate it immediately by re-running `setup.js`.
+4. **Monitor with PM2** — `pm2 logs` to see what's happening.
+5. **Port is locked** — If you set `MCP_PORT` in `.env`, the server will refuse to start if that port is taken (no silent fallback). This keeps your reverse proxy config stable.
+
+---
+
 ## Security Notes 🐾
 
 - **No sandboxing** — you own the server, you know what you're doing

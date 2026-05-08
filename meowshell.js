@@ -43,7 +43,7 @@ const PORT_STATE_FILE = ".mcp_port";
 const DEFAULT_PORT    = 13579;
 
 // ────────────────────────────────────────────────
-//  CLI flags
+//  CLI flags — exit immediately without loading server
 // ────────────────────────────────────────────────
 
 if (process.argv.includes("--version") || process.argv.includes("-v")) {
@@ -51,8 +51,41 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--health")) {
+  console.log("Checking server health...");
+
+  let port = DEFAULT_PORT;
+  try {
+    port = parseInt(readFileSync(PORT_STATE_FILE, "utf-8").trim(), 10) || DEFAULT_PORT;
+  } catch { /* use default */ }
+
+  http.get(`http://localhost:${port}/health`, (res) => {
+    let data = "";
+    res.on("data", (chunk) => (data += chunk));
+    res.on("end", () => {
+      try {
+        const json = JSON.parse(data);
+        console.log(`Status: ${json.status}`);
+        console.log(`Version: ${json.version}`);
+        process.exit(json.status === "ok" ? 0 : 1);
+      } catch {
+        console.log("Invalid response from server");
+        process.exit(1);
+      }
+    });
+  }).on("error", () => {
+    console.log("Server not running");
+    process.exit(1);
+  });
+
+  // Keep process alive until the callback above calls process.exit()
+  // No more synchronous code runs after this point for --health.
+  // Node will stay alive waiting for the HTTP callback to fire.
+  // The rest of the module (below) is function definitions — safe.
+}
+
 // ────────────────────────────────────────────────
-//  Port resolution — find a free port, stable across restarts
+//  Port helpers
 // ────────────────────────────────────────────────
 
 async function isPortFree(port) {
@@ -66,16 +99,37 @@ async function isPortFree(port) {
   });
 }
 
-async function resolvePort(preferred) {
-  // 1. Try the saved port first (stable across restarts)
-  let startAt = preferred;
-  try {
-    const saved = await readFile(PORT_STATE_FILE, "utf-8");
-    const parsed = parseInt(saved.trim(), 10);
-    if (!isNaN(parsed) && parsed > 0 && parsed < 65536) startAt = parsed;
-  } catch { /* no saved port yet */ }
+/**
+ * Resolve port with two modes:
+ * - LOCKED (explicit): MCP_PORT env var set → use exact port, fail if taken
+ * - AUTO (first run): No env set → try saved port, scan if needed, save result
+ */
+async function resolvePort(explicitPort, savedPort) {
+  // Mode 1: Explicit port set by user → LOCKED (fail if taken, no auto-fallback)
+  if (explicitPort != null) {
+    const free = await isPortFree(explicitPort);
+    if (!free) {
+      console.error(`FATAL: Port ${explicitPort} is already in use.`);
+      console.error(`       Either free the port or choose a different one.`);
+      process.exit(1);
+    }
+    // Save it for reference
+    try { await writeFile(PORT_STATE_FILE, String(explicitPort), "utf-8"); } catch {}
+    return explicitPort;
+  }
 
-  // 2. Scan for a free port (up to 100 attempts)
+  // Mode 2: No explicit port → AUTO (first run or restoring previous)
+  // Try saved port first (stable across restarts)
+  if (savedPort != null) {
+    const free = await isPortFree(savedPort);
+    if (free) {
+      return savedPort;
+    }
+    // Saved port is taken — fall through to scan
+  }
+
+  // Scan for a free port (up to 100 attempts from default)
+  const startAt = 13579;
   for (let i = 0; i < 100; i++) {
     const candidate = startAt + i;
     if (candidate > 65535) break;
@@ -92,37 +146,10 @@ async function resolvePort(preferred) {
 }
 
 // ────────────────────────────────────────────────
-//  Configuration
-// ────────────────────────────────────────────────
-
-const MCP_TOKEN = process.env.MCP_TOKEN;
-if (!MCP_TOKEN) {
-  console.error("FATAL: MCP_TOKEN environment variable is required");
-  process.exit(1);
-}
-
-const PORT        = await resolvePort(parseInt(process.env.MCP_PORT || String(DEFAULT_PORT), 10));
-const WORKDIR     = resolve(process.env.MCP_WORKDIR       || process.cwd());
-const MAX_TIMEOUT = 10 * 60 * 1000; // 10 minutes max
-const TIMEOUT     = (() => {
-  const raw = parseInt(process.env.MCP_TIMEOUT || "30000", 10);
-  if (isNaN(raw) || raw <= 0) {
-    console.error(`FATAL: MCP_TIMEOUT must be a positive number (ms). Got: ${process.env.MCP_TIMEOUT}`);
-    process.exit(1);
-  }
-  if (raw > MAX_TIMEOUT) {
-    console.error(`FATAL: MCP_TIMEOUT cannot exceed ${MAX_TIMEOUT}ms (10 minutes). Got: ${raw}`);
-    process.exit(1);
-  }
-  return raw;
-})();
-const CERT_PATH   = process.env.MCP_CERT_PATH             || "";
-const KEY_PATH    = process.env.MCP_KEY_PATH              || "";
-const HAS_TLS     = CERT_PATH.length > 0 && KEY_PATH.length > 0;
-
-// ────────────────────────────────────────────────
 //  Auth
 // ────────────────────────────────────────────────
+
+let MCP_TOKEN = "";
 
 function isAuthenticated(req) {
   const auth = req.headers["authorization"];
@@ -140,7 +167,6 @@ function sendStatus(res, code, body) {
 // ────────────────────────────────────────────────
 
 function safeResolve(base, input) {
-  // Normalise path separators and resolve symlinks
   const target = resolve(base, input);
   if (!target.startsWith(base)) {
     const err = new Error(`Path traversal denied: "${input}" resolves outside the working directory`);
@@ -221,9 +247,11 @@ const TOOL_DEFINITIONS = [
 //  Tool handlers
 // ────────────────────────────────────────────────
 
+let WORKDIR = process.cwd();
+let TIMEOUT = 30000;
+
 async function handleToolCall(name, args) {
   switch (name) {
-    // ── exec ──────────────────────────────────
     case "exec": {
       const { command } = args;
       return new Promise((resolvePromise) => {
@@ -236,20 +264,13 @@ async function handleToolCall(name, args) {
             if (stderr) content.push({ type: "text", text: stderr });
 
             if (error) {
-              // Append timeout hint if the process was killed
               if (error.killed || error.signal === "SIGTERM") {
                 content.push({
                   type: "text",
                   text: `\n[Command timed out after ${TIMEOUT}ms and was terminated]`,
                 });
               }
-
-              // Non-zero exit → return the output as tool content with isError,
-              // so the AI client can decide what to do instead of getting a hard error.
-              return resolvePromise({
-                content,
-                isError: true,
-              });
+              return resolvePromise({ content, isError: true });
             }
 
             resolvePromise({ content });
@@ -258,30 +279,22 @@ async function handleToolCall(name, args) {
       });
     }
 
-    // ── read_file ───────────────────────────────
     case "read_file": {
       const targetPath = safeResolve(WORKDIR, args.path);
       const content = await readFile(targetPath, "utf-8");
       return { content: [{ type: "text", text: content }] };
     }
 
-    // ── write_file ──────────────────────────────
     case "write_file": {
       const targetPath = safeResolve(WORKDIR, args.path);
       const parentDir = resolve(targetPath, "..");
       await mkdir(parentDir, { recursive: true });
       await writeFile(targetPath, args.content, "utf-8");
       return {
-        content: [
-          {
-            type: "text",
-            text: `File written: ${relative(WORKDIR, targetPath)}`,
-          },
-        ],
+        content: [{ type: "text", text: `File written: ${relative(WORKDIR, targetPath)}` }],
       };
     }
 
-    // ── list_dir ────────────────────────────────
     case "list_dir": {
       const targetPath = safeResolve(WORKDIR, args.path);
       const entries = await readdir(targetPath, { withFileTypes: true });
@@ -297,127 +310,152 @@ async function handleToolCall(name, args) {
 }
 
 // ────────────────────────────────────────────────
-//  MCP Server
+//  Server startup (only if not running CLI flags)
 // ────────────────────────────────────────────────
 
-const mcpServer = new Server(
-  {
-    name: "mcp-shell-server",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
+async function startServer() {
+  // ── Config ──
+  MCP_TOKEN = process.env.MCP_TOKEN;
+  if (!MCP_TOKEN) {
+    console.error("FATAL: MCP_TOKEN environment variable is required");
+    process.exit(1);
+  }
 
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOL_DEFINITIONS,
-}));
+  const explicitPort = process.env.MCP_PORT
+    ? parseInt(process.env.MCP_PORT, 10)
+    : null;
 
-mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  let savedPort = null;
   try {
-    return await handleToolCall(name, args ?? {});
-  } catch (err) {
-    // Distinguish between traversal-denied (client mistake) vs. internal errors
-    if (err.code === "TRAVERSAL") {
-      return { content: [{ type: "text", text: err.message }], isError: true };
+    const saved = await readFile(PORT_STATE_FILE, "utf-8");
+    const parsed = parseInt(saved.trim(), 10);
+    if (!isNaN(parsed) && parsed > 0 && parsed < 65536) savedPort = parsed;
+  } catch { /* no saved port yet */ }
+
+  const PORT = await resolvePort(explicitPort, savedPort);
+  WORKDIR = resolve(process.env.MCP_WORKDIR || process.cwd());
+
+  const MAX_TIMEOUT = 10 * 60 * 1000;
+  const rawTimeout = parseInt(process.env.MCP_TIMEOUT || "30000", 10);
+  if (isNaN(rawTimeout) || rawTimeout <= 0) {
+    console.error(`FATAL: MCP_TIMEOUT must be a positive number (ms). Got: ${process.env.MCP_TIMEOUT}`);
+    process.exit(1);
+  }
+  if (rawTimeout > MAX_TIMEOUT) {
+    console.error(`FATAL: MCP_TIMEOUT cannot exceed ${MAX_TIMEOUT}ms (10 minutes). Got: ${rawTimeout}`);
+    process.exit(1);
+  }
+  TIMEOUT = rawTimeout;
+
+  const CERT_PATH = process.env.MCP_CERT_PATH || "";
+  const KEY_PATH  = process.env.MCP_KEY_PATH  || "";
+  const HAS_TLS   = CERT_PATH.length > 0 && KEY_PATH.length > 0;
+
+  // ── MCP Server ──
+  const mcpServer = new Server(
+    { name: "mcp-shell-server", version: VERSION },
+    { capabilities: { tools: {} } },
+  );
+
+  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: TOOL_DEFINITIONS,
+  }));
+
+  mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      return await handleToolCall(name, args ?? {});
+    } catch (err) {
+      if (err.code === "TRAVERSAL") {
+        return { content: [{ type: "text", text: err.message }], isError: true };
+      }
+      console.error(`Tool call "${name}" failed:`, err);
+      return { content: [{ type: "text", text: `Internal error: ${err.message}` }], isError: true };
     }
-    // Actual unexpected errors
-    console.error(`Tool call "${name}" failed:`, err);
-    return { content: [{ type: "text", text: `Internal error: ${err.message}` }], isError: true };
-  }
-});
+  });
 
-// ────────────────────────────────────────────────
-//  HTTP(S) Server + Streamable HTTP Transport
-// ────────────────────────────────────────────────
+  // ── HTTP(S) Server + Transport ──
+  const transport = new StreamableHTTPServerTransport();
 
-const transport = new StreamableHTTPServerTransport();
+  const requestHandler = async (req, res) => {
+    // CORS
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
 
-const requestHandler = async (req, res) => {
-  // ── CORS (permissive; this is a personal tool) ──
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-
-  // ── CORS preflight ──
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  // ── Health check (no auth required) ──
-  if (req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", version: VERSION }));
-    return;
-  }
-
-  // ── Auth — every request must carry a valid token ──
-  if (!isAuthenticated(req)) {
-    return sendStatus(res, 401, {
-      error: "Unauthorized",
-      message: "Missing or invalid Authorization header. Use: Bearer <token>",
-    });
-  }
-
-  // ── Route: only /mcp is handled ──
-  if (req.url !== "/mcp") {
-    res.writeHead(404);
-    res.end("Not Found");
-    return;
-  }
-
-  // ── Delegate to MCP transport ──
-  try {
-    await transport.handleRequest(req, res);
-  } catch (err) {
-    console.error("Transport error:", err);
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Internal Server Error" }));
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
     }
-  }
-};
 
-// ────────────────────────────────────────────────
-//  Start
-// ────────────────────────────────────────────────
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", version: VERSION }));
+      return;
+    }
 
-let server;
-if (HAS_TLS) {
-  const tlsOptions = {
-    cert: readFileSync(CERT_PATH),
-    key:  readFileSync(KEY_PATH),
+    if (!isAuthenticated(req)) {
+      return sendStatus(res, 401, {
+        error: "Unauthorized",
+        message: "Missing or invalid Authorization header. Use: Bearer <token>",
+      });
+    }
+
+    if (req.url !== "/mcp") {
+      res.writeHead(404);
+      res.end("Not Found");
+      return;
+    }
+
+    try {
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("Transport error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal Server Error" }));
+      }
+    }
   };
-  server = https.createServer(tlsOptions, requestHandler);
-} else {
-  server = http.createServer(requestHandler);
-}
 
-try {
-  await mcpServer.connect(transport);
-} catch (err) {
-  console.error("FATAL: Failed to connect MCP server to transport:", err);
-  process.exit(1);
-}
-
-const protocol = HAS_TLS ? "https" : "http";
-server.listen(PORT, () => {
-  console.log(`┌──────────────────────────────────────────────┐`);
-  console.log(`│  🐱  MCP Shell Server                        │`);
-  console.log(`│                                              │`);
-  console.log(`│  ${(protocol + "://localhost:" + PORT).padEnd(44)}│`);
-  console.log(`│  Workdir   : ${WORKDIR.padEnd(35)}│`);
-  console.log(`│  Timeout   : ${String(TIMEOUT).padEnd(10)}ms${" ".repeat(25)}│`);
-  console.log(`│  Endpoint  : /mcp                            │`);
+  let server;
   if (HAS_TLS) {
-    console.log(`│  TLS       : enabled${" ".repeat(29)}│`);
+    const tlsOptions = {
+      cert: readFileSync(CERT_PATH),
+      key:  readFileSync(KEY_PATH),
+    };
+    server = https.createServer(tlsOptions, requestHandler);
+  } else {
+    server = http.createServer(requestHandler);
   }
-  console.log(`│  Port saved: .mcp_port${" ".repeat(24)}│`);
-  console.log(`└──────────────────────────────────────────────┘`);
-});
+
+  try {
+    await mcpServer.connect(transport);
+  } catch (err) {
+    console.error("FATAL: Failed to connect MCP server to transport:", err);
+    process.exit(1);
+  }
+
+  const protocol = HAS_TLS ? "https" : "http";
+  server.listen(PORT, () => {
+    console.log(`┌──────────────────────────────────────────────┐`);
+    console.log(`│  🐱  MCP Shell Server                        │`);
+    console.log(`│                                              │`);
+    console.log(`│  ${(protocol + "://localhost:" + PORT).padEnd(44)}│`);
+    console.log(`│  Workdir   : ${WORKDIR.padEnd(35)}│`);
+    console.log(`│  Timeout   : ${String(TIMEOUT).padEnd(10)}ms${" ".repeat(25)}│`);
+    console.log(`│  Endpoint  : /mcp                            │`);
+    if (HAS_TLS) {
+      console.log(`│  TLS       : enabled${" ".repeat(29)}│`);
+    }
+    console.log(`│  Port saved: .mcp_port${" ".repeat(24)}│`);
+    console.log(`└──────────────────────────────────────────────┘`);
+  });
+}
+
+// ── Start the server (for --health, the async http.get callback
+//    above keeps the event loop alive until process.exit is called) ──
+if (!process.argv.includes("--health") && !process.argv.includes("--version") && !process.argv.includes("-v")) {
+  await startServer();
+}

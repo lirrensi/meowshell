@@ -7,12 +7,33 @@
  *
  * Usage:
  *   node kill.js
+ *
+ * Also checks --health first to confirm server is actually running.
  */
 
 import { readFile } from "node:fs/promises";
 import { exec } from "node:child_process";
+import http from "node:http";
 
 const PORT_FILE = ".mcp_port";
+const DEFAULT_PORT = 13579;
+
+async function checkHealth(port) {
+  return new Promise((resolve) => {
+    http.get(`http://localhost:${port}/health`, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          resolve(json.status === "ok");
+        } catch {
+          resolve(false);
+        }
+      });
+    }).on("error", () => resolve(false));
+  });
+}
 
 async function main() {
   let port;
@@ -24,7 +45,16 @@ async function main() {
       process.exit(1);
     }
   } catch {
-    console.error("No .mcp_port found. Is the server running?");
+    console.error(`No .mcp_port found. Defaulting to ${DEFAULT_PORT}.`);
+    console.error("Run 'node meowshell.js --health' to verify server is running.");
+    process.exit(1);
+  }
+
+  // Check if server is actually running
+  const isRunning = await checkHealth(port);
+  if (!isRunning) {
+    console.log(`Server on port ${port} is not responding.`);
+    console.log("Either the server is not running, or it's on a different port.");
     process.exit(1);
   }
 
