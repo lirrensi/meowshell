@@ -1,8 +1,8 @@
-# meowshell
+# meowshell 🐱
 
 > Give any web-based MCP client shell access to your machine — no SSH, no local setup required.
 
-## What is this?
+## What is this? 🐾
 
 meowshell is a lightweight HTTP server that exposes local shell execution as MCP tools. If you want your Claude.ai, Cursor, or any other web-based MCP client to actually run commands on a real machine, this server bridges that gap.
 
@@ -32,16 +32,16 @@ meowshell is a lightweight HTTP server that exposes local shell execution as MCP
 - **Version flag** — `node meowshell.js --version`
 - **PM2-ready** — ecosystem config generated automatically
 
-## Quick Start
+## Quick Start 🐾
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/yourusername/meowshell.git
+git clone https://github.com/lirrensi/meowshell.git
 cd meowshell
 npm install   # or pnpm install
 
 # 2. Run the setup wizard (creates .env, client config, ecosystem file)
-node setup.js
+node meowshell-setup.js
 
 # 3. Start the server
 node meowshell.js
@@ -49,20 +49,20 @@ node meowshell.js
 
 That's it. The setup wizard asks a few questions, generates everything, and you're ready to paste the client config into your MCP client.
 
-## Setup Wizard Options
+## Setup Wizard Options 🐾
 
 ```bash
-# Interactive mode (default)
-node setup.js
+# Interactive mode (default) — purrfect for first-time setup
+node meowshell-setup.js
 
 # CLI mode — skip all questions
-node setup.js --port 13579 --timeout 30000
+node meowshell-setup.js --port 13579 --timeout 30000
 
 # With domain for Caddy auto-HTTPS
-node setup.js --domain myserver.com
+node meowshell-setup.js --domain myserver.com
 
 # Skip PM2 auto-start
-node setup.js --no-pm2
+node meowshell-setup.js --no-pm2
 ```
 
 ## Manual Configuration
@@ -117,27 +117,27 @@ After running `node setup.js`, you'll get a `mcp-client-config.json` file. Paste
 | `write_file` | `{ path: string, content: string }` | Write text to a file |
 | `list_dir` | `{ path: string }` | List directory contents |
 
-## Deployment
+## Deployment 🐾
 
 ### Development (localhost)
 
 ```bash
-node setup.js
+node meowshell-setup.js
 node meowshell.js
 ```
 
-### Production (remote server)
+### Production (remote server) 🐱
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/yourusername/meowshell.git
+git clone https://github.com/lirrensi/meowshell.git
 cd meowshell
 npm install
 
 # 2. Run setup (sets port, token, generates everything)
-node setup.js --port 13579 --timeout 30000 --domain yourdomain.com
+node meowshell-setup.js --port 13579 --timeout 30000 --domain yourdomain.com
 
-# 3. Start with PM2 (auto-restart on crash)
+# 3. Start with PM2 (auto-restart on crash, like a catnap!)
 npx pm2 start ecosystem.config.cjs
 npx pm2 save
 ```
@@ -158,22 +158,22 @@ yourdomain.com {
 }
 ```
 
-## Security Notes
+## Security Notes 🐾
 
 - **No sandboxing** — you own the server, you know what you're doing
-- **Single user** — one token, one owner
+- **Single user** — one token, one owner (like a solo cat)
 - **No multi-tenant** — not designed for shared access
 - **No auth system** — bearer token rotated manually via `.env`
 - **Path traversal protection** — `read_file`/`write_file` cannot escape `MCP_WORKDIR`
 
-## Utility Scripts
+## Utility Scripts 🐱
 
 ```bash
 # Check server version
 node meowshell.js --version
 
-# Gracefully kill the server
-node kill.js
+# Gracefully kill the server (no hissing!)
+node meowshell-kill.js
 ```
 
 ## File Structure
@@ -190,11 +190,11 @@ meowshell/
 └── mcp-client-config.json  # Client config (generated)
 ```
 
-## Why this exists
+## Why this exists 🐾
 
 Web-based MCP clients (browser, hosted apps) have no filesystem, no SSH, no local process execution. They can only connect to remote MCP servers over HTTP. There was no existing minimal, self-hostable server that bridges this gap.
 
-If you want to give a web client "hands" on a real machine, you have to build it yourself. This is that built thing.
+If you want to give a web client "hands" on a real machine, you have to build it yourself. This is that built thing. (No more scratching around for solutions!)
 
 ## Requirements
 
