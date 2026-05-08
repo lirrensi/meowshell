@@ -1,0 +1,16 @@
+{
+  "name": "meowshell",
+  "version": "1.0.0",
+  "description": "Give any web-based MCP client shell access to your machine — no SSH, no local setup required",
+  "type": "module",
+  "main": "meowshell.js",
+  "scripts": {
+    "start": "node meowshell.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
